@@ -84,6 +84,7 @@ public class ExtBridge implements Runnable {
     private static Method sMMirrorDisplay;
     private static Method sMStartActivity;
     private static Method sMSetUserPreferredMode;
+    private static Object sUserPreferredModeTarget;
 
     private static volatile int sExtId = -1;
     private static volatile int sVdId = -1;
@@ -241,8 +242,50 @@ public class ExtBridge implements Runnable {
             }
         } catch (Throwable ignored) {}
         try {
-            sMSetUserPreferredMode = DisplayManager.class.getMethod("setUserPreferredDisplayMode", int.class, Display.Mode.class, boolean.class);
+            Class<?> globalCls = Class.forName("android.hardware.display.DisplayManagerGlobal");
+            Object global = globalCls.getMethod("getInstance").invoke(null);
+            sMSetUserPreferredMode = findUserPreferredModeMethod(globalCls);
+            if (sMSetUserPreferredMode != null) {
+                sUserPreferredModeTarget = global;
+            }
         } catch (Throwable ignored) {}
+        if (sMSetUserPreferredMode == null) {
+            try {
+                sMSetUserPreferredMode = findUserPreferredModeMethod(DisplayManager.class);
+                if (sMSetUserPreferredMode != null) {
+                    sUserPreferredModeTarget = sDm;
+                }
+            } catch (Throwable ignored) {}
+        }
+        try {
+            if (sMSetUserPreferredMode != null) {
+                System.out.println("EXTBRIDGE_DISPLAY_MODE_API="
+                        + Arrays.toString(sMSetUserPreferredMode.getParameterTypes()));
+            } else {
+                System.out.println("EXTBRIDGE_DISPLAY_MODE_API=NONE");
+            }
+        } catch (Throwable t) {
+            System.out.println("EXTBRIDGE_DISPLAY_MODE_API=ERROR " + t);
+        }
+    }
+
+    private static Method findUserPreferredModeMethod(Class<?> cls) {
+        for (Method m : cls.getMethods()) {
+            if (!m.getName().equals("setUserPreferredDisplayMode")) continue;
+            Class<?>[] p = m.getParameterTypes();
+            if (p.length == 2
+                    && p[0] == int.class
+                    && p[1] == Display.Mode.class) {
+                return m;
+            }
+            if (p.length == 3
+                    && p[0] == int.class
+                    && p[1] == Display.Mode.class
+                    && p[2] == boolean.class) {
+                return m;
+            }
+        }
+        return null;
     }
 
     private static void loadConf() {
@@ -751,15 +794,33 @@ public class ExtBridge implements Runnable {
                     }
                     if (chosenMode != null) {
                         try {
-                            sMSetUserPreferredMode.invoke(sDm, ext.getDisplayId(), chosenMode, true);
-                            sPhysW = chosenMode.getPhysicalWidth();
-                            sPhysH = chosenMode.getPhysicalHeight();
-                            sPhysFps = chosenMode.getRefreshRate();
-                            System.out.println("EXTBRIDGE_PHYS_MODE=" + chosenMode.getModeId() + " " + sPhysW + "x" + sPhysH + "@" + sPhysFps);
+                            Class<?>[] p = sMSetUserPreferredMode.getParameterTypes();
+                            if (p.length == 2) {
+                                sMSetUserPreferredMode.invoke(sUserPreferredModeTarget,
+                                        ext.getDisplayId(), chosenMode);
+                            } else if (p.length == 3) {
+                                sMSetUserPreferredMode.invoke(sUserPreferredModeTarget,
+                                        ext.getDisplayId(), chosenMode, true);
+                            } else {
+                                throw new IllegalStateException("unsupported parameter count: " + p.length);
+                            }
+                            System.out.println("EXTBRIDGE_PHYS_MODE_REQUESTED="
+                                    + chosenMode.getModeId() + " "
+                                    + chosenMode.getPhysicalWidth() + "x"
+                                    + chosenMode.getPhysicalHeight() + "@"
+                                    + chosenMode.getRefreshRate());
+                            if (sHandler != null) {
+                                sHandler.postDelayed(ExtBridge::refreshPhysicalMode, 500);
+                            }
                         } catch (Throwable t) {
-                            t.printStackTrace();
+                            System.out.println("EXTBRIDGE_PHYS_MODE_FAILED=" + t);
                         }
+                    } else {
+                        System.out.println("EXTBRIDGE_PHYS_MODE_UNAVAILABLE requested="
+                                + reqW + "x" + reqH + "@" + fps);
                     }
+                } else if (ext != null) {
+                    System.out.println("EXTBRIDGE_PHYS_MODE_API_UNAVAILABLE");
                 }
             }
 
@@ -769,6 +830,23 @@ public class ExtBridge implements Runnable {
         } catch (Throwable t) {
             t.printStackTrace();
             return false;
+        }
+    }
+
+    private static void refreshPhysicalMode() {
+        try {
+            Display ext = findExternalDisplay();
+            if (ext == null) return;
+            Display.Mode mode = ext.getMode();
+            if (mode == null) return;
+            sPhysW = mode.getPhysicalWidth();
+            sPhysH = mode.getPhysicalHeight();
+            sPhysFps = mode.getRefreshRate();
+            System.out.println("EXTBRIDGE_PHYS_MODE_ACTIVE=" + mode.getModeId() + " "
+                    + sPhysW + "x" + sPhysH + "@" + sPhysFps);
+            notifyHelperSync();
+        } catch (Throwable t) {
+            System.out.println("EXTBRIDGE_PHYS_MODE_READ_FAILED=" + t);
         }
     }
 
